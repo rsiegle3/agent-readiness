@@ -47,8 +47,8 @@ CONFUSED_MIN = 0.50      # P(could mean another object) at or above this -> "eas
 NAME_MATCH_MIN = 0.50    # P(name matches) below this -> "name may not match"
 DESCRIPTION_MIN = 1.5    # description score below this -> "weak description"
 
-MAX_CALL_TOKENS = 64_000  # Jev limit per call; estimated as len(json)/4
-CHARS_PER_TOKEN = 4
+MAX_CALL_TOKENS = 64_000  # Jev limit per call; estimated as len(json)/3 (len/4 undercounted)
+CHARS_PER_TOKEN = 3
 
 
 # ============================================================== loading =====
@@ -301,9 +301,18 @@ def main():
     client = TypeSafeClient(model=JEV_MODEL)
     res = {"timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
            "repo": root.name, "jev_model": JEV_MODEL, "batches": []}
-    for g, members in plan:
+    def run(g, members):
         print(f"{g}: {len(members)} objects", file=sys.stderr)
-        model, answers = ask_jev(client, members)
+        try:
+            model, answers = ask_jev(client, members)
+        except Exception as e:  # Jev rejected the call as too large: split and retry
+            if "max_tokens_exceeded" not in str(e) or len(members) < 2:
+                raise
+            print(f"  too large for one call; splitting {len(members)} objects in two", file=sys.stderr)
+            mid = len(members) // 2
+            run(g, members[:mid])
+            run(g, members[mid:])
+            return
         res["jev_model"] = model
         res["batches"].append({
             "group": g,
@@ -312,6 +321,9 @@ def main():
             "objects": [{"name": o.name, "label": o.label, "description": o.description,
                          "folder": o.folder, "measures_referenced": o.refs, "kind": o.kind,
                          "file": str(o.file.relative_to(root))} for o in members]})
+
+    for g, members in plan:
+        run(g, members)
     Path("results.json").write_text(json.dumps(res, indent=2, ensure_ascii=False))
     Path("report.html").write_text(render(res))
     print("Wrote results.json and report.html")
